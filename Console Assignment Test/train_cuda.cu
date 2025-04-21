@@ -1,15 +1,40 @@
+// File: train_cuda.cu
 #ifdef __CUDACC__
 #include "train_cuda.h"
+#include "evaluate.h"
 #include <iostream>
 #include <cuda_runtime.h>
+#include <curand.h>
+#include <curand_kernel.h>
 #include <iomanip>
+#include <random>
+#include <algorithm>
+#include <cmath>
+
+// Constants for CNN architecture
+#define CONV_KERNEL_SIZE 5
+#define CONV_OUT_CHANNELS 16
+#define CONV_OUT_SIZE (IMAGE_SIZE - CONV_KERNEL_SIZE + 1)
+#define POOL_OUT_SIZE (CONV_OUT_SIZE / 2)
+#define FC_INPUT_SIZE (POOL_OUT_SIZE * POOL_OUT_SIZE * CONV_OUT_CHANNELS)
+#define LEARNING_RATE 0.01f
+#define BATCH_SIZE 100
+#define NUM_EPOCHS 10
+
+// CNN Model parameters
+struct CNNParams {
+    float* conv_kernels;    // [CONV_OUT_CHANNELS, CONV_KERNEL_SIZE, CONV_KERNEL_SIZE]
+    float* conv_bias;       // [CONV_OUT_CHANNELS]
+    float* fc_weights;      // [FC_INPUT_SIZE, NUM_CLASSES]
+    float* fc_bias;         // [NUM_CLASSES]
+};
 
 // Debug helper functions
 void print_image_sample(const Image& img) {
     std::cout << "Image Label: " << img.label << "\n";
-    std::cout << "First 64 pixels (8x8 corner):\n";
-    for (int i = 0; i < 8; ++i) {
-        for (int j = 0; j < 8; ++j) {
+    std::cout << "First 1024 pixels (32x32 corner):\n";
+    for (int i = 0; i < 32; ++i) {
+        for (int j = 0; j < 32; ++j) {
             std::cout << std::fixed << std::setprecision(2)
                 << img.pixels[i * IMAGE_SIZE + j] << " ";
         }
@@ -27,25 +52,274 @@ void check_cuda_error(cudaError_t error, const char* message) {
     }
 }
 
-// Kernel function for convolution layer (dummy operation)
-__global__ void conv_layer_gpu(float* input, float* output, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        // Store original value for debugging
-        float original = input[idx];
-        output[idx] = input[idx] * 0.5f; // dummy operation
+// Randomly initialize parameters
+void init_parameters(CNNParams* params) {
+    cudaError_t error;
 
-        // Add debug printf (only works with compute capability 2.0+)
-        if (idx < 5) {
-            printf("Thread %d: Input=%.2f, Output=%.2f\n",
-                idx, original, output[idx]);
+    // Allocate memory for convolution kernels
+    error = cudaMalloc(&params->conv_kernels,
+        CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float));
+    check_cuda_error(error, "Conv kernels allocation failed");
+
+    // Allocate memory for convolution bias
+    error = cudaMalloc(&params->conv_bias, CONV_OUT_CHANNELS * sizeof(float));
+    check_cuda_error(error, "Conv bias allocation failed");
+
+    // Allocate memory for fully connected weights
+    error = cudaMalloc(&params->fc_weights, FC_INPUT_SIZE * NUM_CLASSES * sizeof(float));
+    check_cuda_error(error, "FC weights allocation failed");
+
+    // Allocate memory for fully connected bias
+    error = cudaMalloc(&params->fc_bias, NUM_CLASSES * sizeof(float));
+    check_cuda_error(error, "FC bias allocation failed");
+
+    // Initialize host memory for random weights
+    float* h_conv_kernels = new float[CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE];
+    float* h_conv_bias = new float[CONV_OUT_CHANNELS];
+    float* h_fc_weights = new float[FC_INPUT_SIZE * NUM_CLASSES];
+    float* h_fc_bias = new float[NUM_CLASSES];
+
+    // Use Xavier initialization
+    float conv_scale = sqrtf(3.0f / (CONV_KERNEL_SIZE * CONV_KERNEL_SIZE));
+    float fc_scale = sqrtf(3.0f / FC_INPUT_SIZE);
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> conv_dist(-conv_scale, conv_scale);
+    std::uniform_real_distribution<float> fc_dist(-fc_scale, fc_scale);
+
+    // Initialize conv kernels
+    for (int i = 0; i < CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE; ++i) {
+        h_conv_kernels[i] = conv_dist(gen);
+    }
+
+    // Initialize conv bias
+    for (int i = 0; i < CONV_OUT_CHANNELS; ++i) {
+        h_conv_bias[i] = 0.0f;  // Initialize bias to zero
+    }
+
+    // Initialize FC weights
+    for (int i = 0; i < FC_INPUT_SIZE * NUM_CLASSES; ++i) {
+        h_fc_weights[i] = fc_dist(gen);
+    }
+
+    // Initialize FC bias
+    for (int i = 0; i < NUM_CLASSES; ++i) {
+        h_fc_bias[i] = 0.0f;  // Initialize bias to zero
+    }
+
+    // Copy to device
+    error = cudaMemcpy(params->conv_kernels, h_conv_kernels,
+        CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float),
+        cudaMemcpyHostToDevice);
+    check_cuda_error(error, "Conv kernels memcpy failed");
+
+    error = cudaMemcpy(params->conv_bias, h_conv_bias,
+        CONV_OUT_CHANNELS * sizeof(float),
+        cudaMemcpyHostToDevice);
+    check_cuda_error(error, "Conv bias memcpy failed");
+
+    error = cudaMemcpy(params->fc_weights, h_fc_weights,
+        FC_INPUT_SIZE * NUM_CLASSES * sizeof(float),
+        cudaMemcpyHostToDevice);
+    check_cuda_error(error, "FC weights memcpy failed");
+
+    error = cudaMemcpy(params->fc_bias, h_fc_bias,
+        NUM_CLASSES * sizeof(float),
+        cudaMemcpyHostToDevice);
+    check_cuda_error(error, "FC bias memcpy failed");
+
+    // Free host memory
+    delete[] h_conv_kernels;
+    delete[] h_conv_bias;
+    delete[] h_fc_weights;
+    delete[] h_fc_bias;
+}
+
+// CUDA kernel for convolution operation
+__global__ void conv2d_kernel(float* input, float* output, float* kernels, float* bias,
+    int in_size, int kernel_size, int out_channels) {
+    int out_size = in_size - kernel_size + 1;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int channel = blockIdx.z;
+
+    if (col < out_size && row < out_size && channel < out_channels) {
+        float sum = bias[channel];
+
+        for (int k_row = 0; k_row < kernel_size; ++k_row) {
+            for (int k_col = 0; k_col < kernel_size; ++k_col) {
+                int input_row = row + k_row;
+                int input_col = col + k_col;
+
+                // Get kernel value - kernel layout: [channel][k_row][k_col]
+                float k_val = kernels[
+                    channel * kernel_size * kernel_size +
+                        k_row * kernel_size +
+                        k_col
+                ];
+
+                // Get input value - input layout: [input_row][input_col]
+                float in_val = input[input_row * in_size + input_col];
+
+                sum += in_val * k_val;
+            }
         }
+
+        // Store result - output layout: [channel][row][col]
+        output[
+            channel * out_size * out_size +
+                row * out_size +
+                col
+        ] = sum;
+    }
+}
+
+// CUDA kernel for ReLU activation
+__global__ void relu_kernel(float* input, float* output, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < size) {
+        output[idx] = fmaxf(0.0f, input[idx]);
+    }
+}
+
+// CUDA kernel for max pooling
+__global__ void maxpool_kernel(float* input, float* output,
+    int in_channels, int in_size, int pool_size) {
+    int out_size = in_size / pool_size;
+    int out_col = blockIdx.x * blockDim.x + threadIdx.x;
+    int out_row = blockIdx.y * blockDim.y + threadIdx.y;
+    int channel = blockIdx.z;
+
+    if (out_col < out_size && out_row < out_size && channel < in_channels) {
+        float max_val = -INFINITY;
+
+        for (int p_row = 0; p_row < pool_size; ++p_row) {
+            for (int p_col = 0; p_col < pool_size; ++p_col) {
+                int in_row = out_row * pool_size + p_row;
+                int in_col = out_col * pool_size + p_col;
+
+                // Get input value - input layout: [channel][in_row][in_col]
+                float val = input[
+                    channel * in_size * in_size +
+                        in_row * in_size +
+                        in_col
+                ];
+
+                max_val = fmaxf(max_val, val);
+            }
+        }
+
+        // Store result - output layout: [channel][out_row][out_col]
+        output[
+            channel * out_size * out_size +
+                out_row * out_size +
+                out_col
+        ] = max_val;
+    }
+}
+
+// CUDA kernel for fully connected layer (matrix multiplication)
+__global__ void fc_kernel(float* input, float* output, float* weights, float* bias,
+    int in_features, int out_features) {
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx < out_features) {
+        float sum = bias[out_idx];
+
+        for (int i = 0; i < in_features; ++i) {
+            sum += input[i] * weights[i * out_features + out_idx];
+        }
+
+        output[out_idx] = sum;
+    }
+}
+
+// CUDA kernel for softmax activation
+__global__ void softmax_kernel(float* input, float* output, int size) {
+    // Find maximum value for numerical stability
+    float max_val = -INFINITY;
+    for (int i = 0; i < size; ++i) {
+        max_val = fmaxf(max_val, input[i]);
+    }
+
+    // Compute exp and sum
+    float sum = 0.0f;
+    for (int i = 0; i < size; ++i) {
+        output[i] = expf(input[i] - max_val);
+        sum += output[i];
+    }
+
+    // Normalize to get probabilities
+    for (int i = 0; i < size; ++i) {
+        output[i] /= sum;
+    }
+}
+
+// CUDA kernel for cross-entropy loss and softmax gradient
+__global__ void softmax_cross_entropy_kernel(float* softmax_output, int* labels,
+    float* loss, float* gradient, int batch_size) {
+    float batch_loss = 0.0f;
+
+    for (int i = 0; i < batch_size; ++i) {
+        int label = labels[i];
+        float prob = softmax_output[i * NUM_CLASSES + label];
+        batch_loss -= logf(fmaxf(prob, 1e-10f)); // Prevent log(0)
+
+        // Calculate gradient: softmax - one_hot
+        for (int j = 0; j < NUM_CLASSES; ++j) {
+            float target = (j == label) ? 1.0f : 0.0f;
+            gradient[i * NUM_CLASSES + j] =
+                (softmax_output[i * NUM_CLASSES + j] - target) / batch_size;
+        }
+    }
+
+    *loss = batch_loss / batch_size;
+}
+
+// CUDA kernel for backward pass of fully connected layer
+__global__ void fc_backward_kernel(float* input, float* grad_output,
+    float* grad_weights, float* grad_bias,
+    int batch_size, int in_features, int out_features) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < in_features * out_features) {
+        int in_idx = idx / out_features;
+        int out_idx = idx % out_features;
+
+        float grad_sum = 0.0f;
+        for (int b = 0; b < batch_size; ++b) {
+            grad_sum += input[b * in_features + in_idx] *
+                grad_output[b * out_features + out_idx];
+        }
+
+        grad_weights[idx] = grad_sum / batch_size;
+    }
+
+    // Calculate bias gradients
+    if (idx < out_features) {
+        float grad_sum = 0.0f;
+        for (int b = 0; b < batch_size; ++b) {
+            grad_sum += grad_output[b * out_features + idx];
+        }
+
+        grad_bias[idx] = grad_sum / batch_size;
+    }
+}
+
+// Function to update parameters with gradients (SGD)
+__global__ void sgd_update_kernel(float* param, float* grad, int size, float lr) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < size) {
+        param[idx] -= lr * grad[idx];
     }
 }
 
 // Function to train the model using CUDA
 void train_cuda(const std::vector<Image>& dataset) {
-    std::cout << "\n=== Starting CUDA Training ===\n";
+    std::cout << "\n=== Starting CUDA CNN Training on CIFAR-10 ===\n";
 
     // Debug: Print dataset info
     std::cout << "Dataset size: " << dataset.size() << " images\n";
@@ -54,17 +328,58 @@ void train_cuda(const std::vector<Image>& dataset) {
         print_image_sample(dataset[0]);
     }
 
-    // Allocate GPU memory
-    float* d_input, * d_output;
-    cudaError_t error;  // Check for CUDA errors
+    // Initialize CNN parameters
+    CNNParams params;
+    init_parameters(&params);
+    std::cout << "CNN parameters initialized\n";
 
-    // Allocate memory for input and output on the GPU
-    error = cudaMalloc(&d_input, IMAGE_PIXELS * sizeof(float));
-    check_cuda_error(error, "Input allocation failed");
+    // Allocate GPU memory for intermediate results
+    float* d_images, * d_conv_output, * d_relu_output, * d_pool_output, * d_fc_output, * d_softmax_output;
+    int* d_labels;
+    float* d_loss;
 
-    // Allocate memory for output on the GPU
-    error = cudaMalloc(&d_output, IMAGE_PIXELS * sizeof(float));
-    check_cuda_error(error, "Output allocation failed");
+    cudaError_t error;
+
+    // Allocate memory for batch inputs and labels
+    error = cudaMalloc(&d_images, BATCH_SIZE * IMAGE_PIXELS * sizeof(float));
+    check_cuda_error(error, "Batch images allocation failed");
+
+    error = cudaMalloc(&d_labels, BATCH_SIZE * sizeof(int));
+    check_cuda_error(error, "Batch labels allocation failed");
+
+    // Allocate memory for intermediate outputs
+    error = cudaMalloc(&d_conv_output,
+        BATCH_SIZE * CONV_OUT_CHANNELS * CONV_OUT_SIZE * CONV_OUT_SIZE * sizeof(float));
+    check_cuda_error(error, "Conv output allocation failed");
+
+    error = cudaMalloc(&d_relu_output,
+        BATCH_SIZE * CONV_OUT_CHANNELS * CONV_OUT_SIZE * CONV_OUT_SIZE * sizeof(float));
+    check_cuda_error(error, "ReLU output allocation failed");
+
+    error = cudaMalloc(&d_pool_output,
+        BATCH_SIZE * CONV_OUT_CHANNELS * POOL_OUT_SIZE * POOL_OUT_SIZE * sizeof(float));
+    check_cuda_error(error, "Pool output allocation failed");
+
+    error = cudaMalloc(&d_fc_output, BATCH_SIZE * NUM_CLASSES * sizeof(float));
+    check_cuda_error(error, "FC output allocation failed");
+
+    error = cudaMalloc(&d_softmax_output, BATCH_SIZE * NUM_CLASSES * sizeof(float));
+    check_cuda_error(error, "Softmax output allocation failed");
+
+    error = cudaMalloc(&d_loss, sizeof(float));
+    check_cuda_error(error, "Loss allocation failed");
+
+    // Allocate memory for gradients
+    float* d_softmax_grad, * d_fc_weights_grad, * d_fc_bias_grad;
+
+    error = cudaMalloc(&d_softmax_grad, BATCH_SIZE * NUM_CLASSES * sizeof(float));
+    check_cuda_error(error, "Softmax gradient allocation failed");
+
+    error = cudaMalloc(&d_fc_weights_grad, FC_INPUT_SIZE * NUM_CLASSES * sizeof(float));
+    check_cuda_error(error, "FC weights gradient allocation failed");
+
+    error = cudaMalloc(&d_fc_bias_grad, NUM_CLASSES * sizeof(float));
+    check_cuda_error(error, "FC bias gradient allocation failed");
 
     // Create CUDA events for timing
     cudaEvent_t start, stop;
@@ -72,58 +387,198 @@ void train_cuda(const std::vector<Image>& dataset) {
     cudaEventCreate(&stop);
     cudaEventRecord(start);
 
-    // Training loop with progress tracking
-    int total_epochs = 5;
+    // Training loop
+    int total_epochs = NUM_EPOCHS;
     for (int epoch = 0; epoch < total_epochs; ++epoch) {
         std::cout << "\nEpoch " << epoch + 1 << "/" << total_epochs << "\n";
 
-        int batch_size = 100; // Process images in batches
-        int num_batches = dataset.size() / batch_size;
+        // Create a copy of the dataset that we can shuffle
+        std::vector<Image> shuffled_data = dataset;
+        std::random_shuffle(shuffled_data.begin(), shuffled_data.end());
+
+        int num_batches = shuffled_data.size() / BATCH_SIZE;
+        float epoch_loss = 0.0f;
+        int correct_predictions = 0;
 
         for (int batch = 0; batch < num_batches; ++batch) {
-            // Process one image as example for debugging
-            const auto& img = dataset[batch * batch_size];
+            // Prepare batch data
+            std::vector<float> batch_images(BATCH_SIZE * IMAGE_PIXELS);
+            std::vector<int> batch_labels(BATCH_SIZE);
 
-            error = cudaMemcpy(d_input, img.pixels.data(),
-                IMAGE_PIXELS * sizeof(float),
+            for (int i = 0; i < BATCH_SIZE; ++i) {
+                const auto& img = shuffled_data[batch * BATCH_SIZE + i];
+                std::copy(img.pixels.begin(), img.pixels.end(),
+                    batch_images.begin() + i * IMAGE_PIXELS);
+                batch_labels[i] = img.label;
+            }
+
+            // Copy batch data to GPU
+            error = cudaMemcpy(d_images, batch_images.data(),
+                BATCH_SIZE * IMAGE_PIXELS * sizeof(float),
                 cudaMemcpyHostToDevice);
-            check_cuda_error(error, "Input transfer failed");
+            check_cuda_error(error, "Batch images transfer failed");
 
-            // Launch kernel
-            int threadsPerBlock = 256;
-            int blocks = (IMAGE_PIXELS + threadsPerBlock - 1) / threadsPerBlock;
-            conv_layer_gpu << <blocks, threadsPerBlock >> > (d_input, d_output, IMAGE_PIXELS);
+            error = cudaMemcpy(d_labels, batch_labels.data(),
+                BATCH_SIZE * sizeof(int),
+                cudaMemcpyHostToDevice);
+            check_cuda_error(error, "Batch labels transfer failed");
 
-            // Check for kernel launch errors
-            error = cudaGetLastError();
-            check_cuda_error(error, "Kernel launch failed");
+            // Forward pass
+            for (int b = 0; b < BATCH_SIZE; ++b) {
+                // Convolution
+                dim3 conv_blocks(
+                    (CONV_OUT_SIZE + 7) / 8,
+                    (CONV_OUT_SIZE + 7) / 8,
+                    CONV_OUT_CHANNELS
+                );
+                dim3 conv_threads(8, 8);
 
-            // Kernel synchronization
-            error = cudaDeviceSynchronize();
-            check_cuda_error(error, "Kernel synchronization failed");
+                conv2d_kernel << <conv_blocks, conv_threads >> > (
+                    d_images + b * IMAGE_PIXELS,
+                    d_conv_output + b * CONV_OUT_CHANNELS * CONV_OUT_SIZE * CONV_OUT_SIZE,
+                    params.conv_kernels,
+                    params.conv_bias,
+                    IMAGE_SIZE,
+                    CONV_KERNEL_SIZE,
+                    CONV_OUT_CHANNELS
+                    );
 
-            // Debug: Verify output (for first batch of each epoch)
-            if (batch == 0) {
-                std::vector<float> output(IMAGE_PIXELS);
-                error = cudaMemcpy(output.data(), d_output,
-                    IMAGE_PIXELS * sizeof(float),
-                    cudaMemcpyDeviceToHost);
-                check_cuda_error(error, "Output transfer failed");
+                // ReLU activation
+                int relu_size = CONV_OUT_CHANNELS * CONV_OUT_SIZE * CONV_OUT_SIZE;
+                int relu_blocks = (relu_size + 255) / 256;
 
-                std::cout << "Sample output values (first 5):\n";
-                for (int i = 0; i < 5; ++i) {
-                    std::cout << output[i] << " ";
+                relu_kernel << <relu_blocks, 256 >> > (
+                    d_conv_output + b * relu_size,
+                    d_relu_output + b * relu_size,
+                    relu_size
+                    );
+
+                // Max pooling
+                dim3 pool_blocks(
+                    (POOL_OUT_SIZE + 7) / 8,
+                    (POOL_OUT_SIZE + 7) / 8,
+                    CONV_OUT_CHANNELS
+                );
+                dim3 pool_threads(8, 8);
+
+                maxpool_kernel << <pool_blocks, pool_threads >> > (
+                    d_relu_output + b * relu_size,
+                    d_pool_output + b * CONV_OUT_CHANNELS * POOL_OUT_SIZE * POOL_OUT_SIZE,
+                    CONV_OUT_CHANNELS,
+                    CONV_OUT_SIZE,
+                    2  // 2x2 pooling
+                    );
+            }
+
+            // Fully connected layer
+            int fc_blocks = (NUM_CLASSES + 255) / 256;
+
+            for (int b = 0; b < BATCH_SIZE; ++b) {
+                fc_kernel << <fc_blocks, 256 >> > (
+                    d_pool_output + b * FC_INPUT_SIZE,
+                    d_fc_output + b * NUM_CLASSES,
+                    params.fc_weights,
+                    params.fc_bias,
+                    FC_INPUT_SIZE,
+                    NUM_CLASSES
+                    );
+
+                // Softmax
+                softmax_kernel << <1, 1 >> > (
+                    d_fc_output + b * NUM_CLASSES,
+                    d_softmax_output + b * NUM_CLASSES,
+                    NUM_CLASSES
+                    );
+            }
+
+            // Loss and gradient computation
+            softmax_cross_entropy_kernel << <1, 1 >> > (
+                d_softmax_output,
+                d_labels,
+                d_loss,
+                d_softmax_grad,
+                BATCH_SIZE
+                );
+
+            // Backward pass - fully connected layer
+            int fc_grad_blocks = (FC_INPUT_SIZE * NUM_CLASSES + 255) / 256;
+            fc_backward_kernel << <fc_grad_blocks, 256 >> > (
+                d_pool_output,
+                d_softmax_grad,
+                d_fc_weights_grad,
+                d_fc_bias_grad,
+                BATCH_SIZE,
+                FC_INPUT_SIZE,
+                NUM_CLASSES
+                );
+
+            // Update parameters
+            int fc_weights_blocks = (FC_INPUT_SIZE * NUM_CLASSES + 255) / 256;
+            sgd_update_kernel << <fc_weights_blocks, 256 >> > (
+                params.fc_weights,
+                d_fc_weights_grad,
+                FC_INPUT_SIZE * NUM_CLASSES,
+                LEARNING_RATE
+                );
+
+            int fc_bias_blocks = (NUM_CLASSES + 255) / 256;
+            sgd_update_kernel << <fc_bias_blocks, 256 >> > (
+                params.fc_bias,
+                d_fc_bias_grad,
+                NUM_CLASSES,
+                LEARNING_RATE
+                );
+
+            // Compute accuracy for this batch
+            std::vector<float> h_softmax_output(BATCH_SIZE * NUM_CLASSES);
+            error = cudaMemcpy(h_softmax_output.data(), d_softmax_output,
+                BATCH_SIZE * NUM_CLASSES * sizeof(float),
+                cudaMemcpyDeviceToHost);
+            check_cuda_error(error, "Softmax output transfer failed");
+
+            float h_loss;
+            error = cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost);
+            check_cuda_error(error, "Loss transfer failed");
+
+            epoch_loss += h_loss;
+
+            // Count correct predictions
+            for (int i = 0; i < BATCH_SIZE; ++i) {
+                int predicted_class = 0;
+                float max_prob = h_softmax_output[i * NUM_CLASSES];
+
+                for (int j = 1; j < NUM_CLASSES; ++j) {
+                    if (h_softmax_output[i * NUM_CLASSES + j] > max_prob) {
+                        max_prob = h_softmax_output[i * NUM_CLASSES + j];
+                        predicted_class = j;
+                    }
                 }
-                std::cout << "\n";
+
+                if (predicted_class == batch_labels[i]) {
+                    correct_predictions++;
+                }
             }
 
             // Show progress
-            if (batch % 10 == 0) {
-                std::cout << "\rProgress: " << batch * batch_size
-                    << "/" << dataset.size() << " images" << std::flush;
+            if (batch % 10 == 0 || batch == num_batches - 1) {
+                float accuracy = static_cast<float>(correct_predictions) / ((batch + 1) * BATCH_SIZE);
+                float avg_loss = epoch_loss / (batch + 1);
+
+                std::cout << "\rBatch " << batch + 1 << "/" << num_batches
+                    << " - Loss: " << std::fixed << std::setprecision(4) << avg_loss
+                    << " - Accuracy: " << std::fixed << std::setprecision(2)
+                    << (accuracy * 100.0f) << "%" << std::flush;
             }
         }
-        std::cout << "\n";
+
+        // Epoch summary
+        float epoch_accuracy = static_cast<float>(correct_predictions) / (num_batches * BATCH_SIZE);
+        epoch_loss /= num_batches;
+
+        std::cout << "\nEpoch " << epoch + 1 << " completed"
+            << " - Loss: " << std::fixed << std::setprecision(4) << epoch_loss
+            << " - Accuracy: " << std::fixed << std::setprecision(2)
+            << (epoch_accuracy * 100.0f) << "%" << std::endl;
     }
 
     // Timing results
@@ -131,13 +586,43 @@ void train_cuda(const std::vector<Image>& dataset) {
     cudaEventSynchronize(stop);
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
-    std::cout << "\nCUDA GPU training completed in "
+    std::cout << "\nCUDA CNN training completed in "
         << milliseconds / 1000.0f << " seconds\n";
 
-    // Cleanup
-    cudaFree(d_input);
-    cudaFree(d_output);
+    // Export model weights for evaluation
+    std::vector<float> h_fc_weights(FC_INPUT_SIZE * NUM_CLASSES);
+    float h_fc_bias;
+
+    error = cudaMemcpy(h_fc_weights.data(), params.fc_weights,
+        FC_INPUT_SIZE * NUM_CLASSES * sizeof(float),
+        cudaMemcpyDeviceToHost);
+    check_cuda_error(error, "Final FC weights transfer failed");
+
+    error = cudaMemcpy(&h_fc_bias, params.fc_bias, sizeof(float), cudaMemcpyDeviceToHost);
+    check_cuda_error(error, "Final FC bias transfer failed");
+
+    // Clean up
+    cudaFree(d_images);
+    cudaFree(d_labels);
+    cudaFree(d_conv_output);
+    cudaFree(d_relu_output);
+    cudaFree(d_pool_output);
+    cudaFree(d_fc_output);
+    cudaFree(d_softmax_output);
+    cudaFree(d_loss);
+    cudaFree(d_softmax_grad);
+    cudaFree(d_fc_weights_grad);
+    cudaFree(d_fc_bias_grad);
+    cudaFree(params.conv_kernels);
+    cudaFree(params.conv_bias);
+    cudaFree(params.fc_weights);
+    cudaFree(params.fc_bias);
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
+
+    // Run evaluation on test set if available
+    std::cout << "\nEvaluating model on test data...\n";
+    evaluate_model("data/test_batch.bin", h_fc_weights, h_fc_bias);
 }
+    
 #endif

@@ -1,5 +1,4 @@
-//File name: evaluate.h
-
+// File: evaluate.h
 #pragma once
 #include "loader.h"
 #include <vector>

@@ -8,7 +8,6 @@
 #include <fstream>
 #include "evaluate.h"
 
-
 int main() {
     std::vector<std::string> train_files = {
         "data/data_batch_1.bin",
@@ -24,8 +23,12 @@ int main() {
         if (!f.good()) {
             std::cerr << "Warning: Cannot open file: " << file << "\n";
         }
+        else {
+            std::cout << "Successfully opened file: " << file << "\n";
+        }
     }
 
+    std::cout << "Loading CIFAR-10 training dataset...\n";
     std::vector<Image> train_data = load_dataset(train_files);
 
     // Verify dataset loading
@@ -46,17 +49,21 @@ int main() {
             std::cout << "Class " << i << ": " << label_counts[i] << " images\n";
         }
     }
+    else {
+        std::cerr << "ERROR: No images were loaded. Please check the dataset path.\n";
+        return 1;
+    }
 
     // Display a sample image before training
     if (!train_data.empty()) {
         std::cout << "Sample image from training set:\n";
         Visualizer::displayImage(train_data[0]);
 
-        std::cout << "Press Enter to start training...";
+        std::cout << "Press Enter to start CNN training using CUDA...";
         std::cin.get();
     }
 
-    // Train the model
+    // Train the model using CUDA
     train_cuda(train_data);
 
     return 0;

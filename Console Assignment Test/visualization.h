@@ -11,7 +11,7 @@ public:
     static void displayImage(const Image& img) {
         std::cout << "\n=== Image Visualization ===\n";
         std::cout << "Label: " << img.label << "\n";
-        std::cout << "32x32 Image Preview:\n";
+        std::cout << "64x64 Image Preview:\n";
 
         // Display the image as ASCII art
         for (int i = 0; i < IMAGE_SIZE; i++) {
