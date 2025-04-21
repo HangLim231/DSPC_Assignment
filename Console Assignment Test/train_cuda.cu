@@ -622,7 +622,7 @@ void train_cuda(const std::vector<Image>& dataset) {
 
     // Run evaluation on test set if available
     std::cout << "\nEvaluating model on test data...\n";
-    evaluate_model("data/test_batch.bin", h_fc_weights, h_fc_bias);
+    evaluate_model("data/test_batch.bin", conv_kernels, conv_bias, h_fc_weights, h_fc_bias);
 }
     
 #endif
