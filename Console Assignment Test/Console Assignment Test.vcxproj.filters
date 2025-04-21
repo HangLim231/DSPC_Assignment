@@ -53,6 +53,12 @@
     <ClInclude Include="layers.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="visualization.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="evaluate.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="train_cuda.cu">

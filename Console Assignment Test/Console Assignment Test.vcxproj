@@ -147,11 +147,13 @@
     <ClCompile Include="train_serial.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="evaluate.h" />
     <ClInclude Include="layers.h" />
     <ClInclude Include="loader.h" />
     <ClInclude Include="train_cuda.h" />
     <ClInclude Include="train_openmp.h" />
     <ClInclude Include="train_serial.h" />
+    <ClInclude Include="visualization.h" />
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="train_cuda.cu" />
