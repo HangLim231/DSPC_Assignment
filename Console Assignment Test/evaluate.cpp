@@ -7,7 +7,7 @@
 #include "evaluate.h"
 
 
-// Add these new functions before the existing predict function
+//Function to display prediction results
 void displayPredictionResults(const Image& img, int prediction, int actual_label) {
     std::cout << "\n=== Prediction Results ===\n";
     Visualizer::displayImage(img);
@@ -16,7 +16,7 @@ void displayPredictionResults(const Image& img, int prediction, int actual_label
     std::cout << "Result: " << (prediction == actual_label ? "Correct!" : "Incorrect") << "\n\n";
 }
 
-// Run a simple CNN forward pass and predict label
+// Function to predict the class of an image
 int predict(const Image& img, const std::vector<float>& fc_weights, float bias) {
     // Convert flat image to 2D matrix
     Matrix input(IMAGE_SIZE, std::vector<float>(IMAGE_SIZE));
@@ -26,11 +26,12 @@ int predict(const Image& img, const std::vector<float>& fc_weights, float bias) 
 
     // Apply conv, relu, pool, flatten, fc
     Matrix kernel = { {1, 0, -1}, {1, 0, -1}, {1, 0, -1} }; // edge detector
-    Matrix conv_out = conv2d(input, kernel);
-    Matrix activated = relu(conv_out);
-    Matrix pooled = maxpool2x2(activated);
-    std::vector<float> features = flatten(pooled);
+    Matrix conv_out = conv2d(input, kernel);    // Convolution
+    Matrix activated = relu(conv_out); // ReLU activation
+    Matrix pooled = maxpool2x2(activated); // Max pooling
+    std::vector<float> features = flatten(pooled); // Flattening
 
+    // Fully connected layer
     float output = fully_connected(features, fc_weights, bias);
     return output > 0.5f ? 1 : 0; // binary decision for test
 }
@@ -68,6 +69,7 @@ void evaluate_model(const std::string& test_path, const std::vector<float>& fc_w
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
 
+    // Calculate accuracy
     float accuracy = (float)correct / test_set.size();
     std::cout << "\n\n=== Evaluation Results ===\n";
     std::cout << "Test accuracy: " << std::fixed << std::setprecision(2)

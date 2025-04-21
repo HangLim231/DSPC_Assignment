@@ -18,6 +18,7 @@ void print_image_sample(const Image& img) {
     std::cout << "\n";
 }
 
+// Error checking function
 void check_cuda_error(cudaError_t error, const char* message) {
     if (error != cudaSuccess) {
         std::cerr << "CUDA Error: " << message << " - "
@@ -26,6 +27,7 @@ void check_cuda_error(cudaError_t error, const char* message) {
     }
 }
 
+// Kernel function for convolution layer (dummy operation)
 __global__ void conv_layer_gpu(float* input, float* output, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -41,6 +43,7 @@ __global__ void conv_layer_gpu(float* input, float* output, int size) {
     }
 }
 
+// Function to train the model using CUDA
 void train_cuda(const std::vector<Image>& dataset) {
     std::cout << "\n=== Starting CUDA Training ===\n";
 
@@ -53,11 +56,13 @@ void train_cuda(const std::vector<Image>& dataset) {
 
     // Allocate GPU memory
     float* d_input, * d_output;
-    cudaError_t error;
+    cudaError_t error;  // Check for CUDA errors
 
+    // Allocate memory for input and output on the GPU
     error = cudaMalloc(&d_input, IMAGE_PIXELS * sizeof(float));
     check_cuda_error(error, "Input allocation failed");
 
+    // Allocate memory for output on the GPU
     error = cudaMalloc(&d_output, IMAGE_PIXELS * sizeof(float));
     check_cuda_error(error, "Output allocation failed");
 
@@ -89,9 +94,11 @@ void train_cuda(const std::vector<Image>& dataset) {
             int blocks = (IMAGE_PIXELS + threadsPerBlock - 1) / threadsPerBlock;
             conv_layer_gpu << <blocks, threadsPerBlock >> > (d_input, d_output, IMAGE_PIXELS);
 
+            // Check for kernel launch errors
             error = cudaGetLastError();
             check_cuda_error(error, "Kernel launch failed");
 
+            // Kernel synchronization
             error = cudaDeviceSynchronize();
             check_cuda_error(error, "Kernel synchronization failed");
 

@@ -3,6 +3,9 @@
 #include <fstream>
 #include <iostream>
 
+using namespace std;
+
+//Function to load CIFAR-10 dataset
 std::vector<Image> load_dataset(const std::vector<std::string>& batch_files) {
     std::vector<Image> dataset;
 
@@ -13,9 +16,11 @@ std::vector<Image> load_dataset(const std::vector<std::string>& batch_files) {
             continue;
         }
 
+        // Read the first 4 bytes to skip the header
         const int record_size = 1 + 3072;
         unsigned char buffer[record_size];
 
+        // Read the file in chunks of record_size
         while (file.read(reinterpret_cast<char*>(buffer), record_size)) {
             Image img;
             img.label = buffer[0];
