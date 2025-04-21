@@ -19,7 +19,7 @@
 #define FC_INPUT_SIZE (POOL_OUT_SIZE * POOL_OUT_SIZE * CONV_OUT_CHANNELS)
 #define LEARNING_RATE 0.01f
 #define BATCH_SIZE 100
-#define NUM_EPOCHS 10
+#define NUM_EPOCHS 5
 
 // CNN Model parameters
 struct CNNParams {
@@ -590,16 +590,24 @@ void train_cuda(const std::vector<Image>& dataset) {
         << milliseconds / 1000.0f << " seconds\n";
 
     // Export model weights for evaluation
-    std::vector<float> h_fc_weights(FC_INPUT_SIZE * NUM_CLASSES);
-    float h_fc_bias;
+    std::vector<float> h_fc_weights(FC_INPUT_SIZE* NUM_CLASSES);
+    std::vector<float> h_fc_bias(NUM_CLASSES); // Changed to vector
+    std::vector<float> h_conv_kernels(CONV_OUT_CHANNELS* CONV_KERNEL_SIZE* CONV_KERNEL_SIZE);
+    std::vector<float> h_conv_bias(CONV_OUT_CHANNELS);
 
-    error = cudaMemcpy(h_fc_weights.data(), params.fc_weights,
-        FC_INPUT_SIZE * NUM_CLASSES * sizeof(float),
+    // Copy parameters from device to host
+    cudaMemcpy(h_fc_weights.data(), params.fc_weights,
+        FC_INPUT_SIZE* NUM_CLASSES * sizeof(float),
         cudaMemcpyDeviceToHost);
-    check_cuda_error(error, "Final FC weights transfer failed");
-
-    error = cudaMemcpy(&h_fc_bias, params.fc_bias, sizeof(float), cudaMemcpyDeviceToHost);
-    check_cuda_error(error, "Final FC bias transfer failed");
+    cudaMemcpy(h_fc_bias.data(), params.fc_bias,
+        NUM_CLASSES * sizeof(float),
+        cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_conv_kernels.data(), params.conv_kernels,
+        CONV_OUT_CHANNELS* CONV_KERNEL_SIZE* CONV_KERNEL_SIZE * sizeof(float),
+        cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_conv_bias.data(), params.conv_bias,
+        CONV_OUT_CHANNELS * sizeof(float),
+        cudaMemcpyDeviceToHost);
 
     // Clean up
     cudaFree(d_images);
@@ -622,7 +630,7 @@ void train_cuda(const std::vector<Image>& dataset) {
 
     // Run evaluation on test set if available
     std::cout << "\nEvaluating model on test data...\n";
-    evaluate_model("data/test_batch.bin", conv_kernels, conv_bias, h_fc_weights, h_fc_bias);
+    evaluate_model("data/test_batch.bin", h_conv_kernels, h_conv_bias, h_fc_weights, h_fc_bias);
 }
     
 #endif
