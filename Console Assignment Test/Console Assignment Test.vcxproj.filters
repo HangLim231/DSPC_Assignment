@@ -13,6 +13,9 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="data">
+      <UniqueIdentifier>{005db541-ac42-4f92-ad66-99b1ba9b9ea5}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Console Assignment Test.cpp">
@@ -55,5 +58,25 @@
     <CudaCompile Include="train_cuda.cu">
       <Filter>Source Files</Filter>
     </CudaCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="data\data_batch_1.bin">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="data\data_batch_2.bin">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="data\data_batch_3.bin">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="data\data_batch_4.bin">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="data\test_batch.bin">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="data\data_batch_5.bin">
+      <Filter>Resource Files</Filter>
+    </None>
   </ItemGroup>
 </Project>

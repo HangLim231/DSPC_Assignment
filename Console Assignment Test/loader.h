@@ -12,4 +12,7 @@ struct Image {
     int label;
 };
 
-std::vector<Image> load_dataset(const std::string& binary_file_path);
+
+// Load multiple CIFAR-10 binary batches into a single dataset
+std::vector<Image> load_dataset(const std::vector<std::string>& batch_files);
+

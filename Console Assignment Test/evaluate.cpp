@@ -4,6 +4,7 @@
 #include <iostream>
 #include <chrono>
 
+
 // Run a simple CNN forward pass and predict label
 int predict(const Image& img, const std::vector<float>& fc_weights, float bias) {
     // Convert flat image to 2D matrix
@@ -25,7 +26,7 @@ int predict(const Image& img, const std::vector<float>& fc_weights, float bias) 
 
 // Evaluate model using test set
 void evaluate_model(const std::string& test_path, const std::vector<float>& fc_weights, float bias) {
-    std::vector<Image> test_set = load_dataset(test_path);
+    std::vector<Image> test_set = load_dataset({test_path});
     int correct = 0;
 
     auto start = std::chrono::high_resolution_clock::now();

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+// Perform 2D convolution on a single-channel image
 Matrix conv2d(const Matrix& input, const Matrix& kernel) {
     int out_h = input.size() - kernel.size() + 1;
     int out_w = input[0].size() - kernel[0].size() + 1;
@@ -22,6 +23,7 @@ Matrix conv2d(const Matrix& input, const Matrix& kernel) {
     return output;
 }
 
+// Apply ReLU activation function
 Matrix relu(const Matrix& input) {
     Matrix output = input;
     for (auto& row : output)
@@ -30,6 +32,8 @@ Matrix relu(const Matrix& input) {
     return output;
 }
 
+
+// Perform 2x2 max pooling
 Matrix maxpool2x2(const Matrix& input) {
     int out_h = input.size() / 2;
     int out_w = input[0].size() / 2;
@@ -47,6 +51,7 @@ Matrix maxpool2x2(const Matrix& input) {
     return output;
 }
 
+// Flatten the 2D matrix into a 1D vector
 std::vector<float> flatten(const Matrix& input) {
     std::vector<float> flat;
     for (const auto& row : input)
@@ -54,6 +59,7 @@ std::vector<float> flatten(const Matrix& input) {
     return flat;
 }
 
+// Fully connected layer
 float fully_connected(const std::vector<float>& input, const std::vector<float>& weights, float bias) {
     float sum = bias;
     for (size_t i = 0; i < input.size(); ++i) {
