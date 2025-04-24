@@ -8,7 +8,7 @@
 #define NUM_CLASSES 10
 
 struct Image {
-    std::vector<float> pixels;
+    std::vector<float> pixels; // Now stores 3 * IMAGE_PIXELS floats (R, G, B interleaved or planar)
     int label;
 };
 

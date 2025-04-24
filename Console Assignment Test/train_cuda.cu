@@ -18,7 +18,8 @@
 #define FC_INPUT_SIZE (POOL_OUT_SIZE * POOL_OUT_SIZE * CONV_OUT_CHANNELS)
 #define LEARNING_RATE 0.01f
 #define BATCH_SIZE 100
-#define NUM_EPOCHS 100
+#define NUM_EPOCHS 5
+#define IN_CHANNELS 3
 
 // CNN Model parameters
 struct CNNParams
@@ -66,7 +67,7 @@ void init_parameters(CNNParams* params)
 
     // Allocate memory for convolution kernels
     error = cudaMalloc(&params->conv_kernels,
-        CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float));
+        CONV_OUT_CHANNELS * IN_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float));
     check_cuda_error(error, "Conv kernels allocation failed");
 
     // Allocate memory for convolution bias
@@ -82,7 +83,7 @@ void init_parameters(CNNParams* params)
     check_cuda_error(error, "FC bias allocation failed");
 
     // Initialize host memory for random weights
-    float* h_conv_kernels = new float[CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE];
+    float* h_conv_kernels = new float[CONV_OUT_CHANNELS * IN_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE];
     float* h_conv_bias = new float[CONV_OUT_CHANNELS];
     float* h_fc_weights = new float[FC_INPUT_SIZE * NUM_CLASSES];
     float* h_fc_bias = new float[NUM_CLASSES];
@@ -97,7 +98,7 @@ void init_parameters(CNNParams* params)
     std::uniform_real_distribution<float> fc_dist(-fc_scale, fc_scale);
 
     // Initialize conv kernels
-    for (int i = 0; i < CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE; ++i)
+    for (int i = 0; i < CONV_OUT_CHANNELS * IN_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE; ++i)
     {
         h_conv_kernels[i] = conv_dist(gen);
     }
@@ -122,7 +123,7 @@ void init_parameters(CNNParams* params)
 
     // Copy to device
     error = cudaMemcpy(params->conv_kernels, h_conv_kernels,
-        CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float),
+        CONV_OUT_CHANNELS * IN_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float),
         cudaMemcpyHostToDevice);
     check_cuda_error(error, "Conv kernels memcpy failed");
 
@@ -172,10 +173,15 @@ __global__ void fc_kernel_batched(
 
 // CUDA kernel for convolution operation
 __global__ void conv2d_kernel(
-    float* input,  // [batch, in_size*in_size]
-    float* output, // [batch, out_channels, out_size, out_size]
-    float* kernels, float* bias,
-    int in_size, int kernel_size, int out_channels, int batch_size)
+    float* input,   // [batch, in_channels, in_size, in_size]
+    float* output,  // [batch, out_channels, out_size, out_size]
+    float* kernels, // [out_channels, in_channels, kernel_size, kernel_size]
+    float* bias,
+    int in_channels,
+    int in_size,
+    int kernel_size,
+    int out_channels,
+    int batch_size)
 {
     int out_size = in_size - kernel_size + 1;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -186,15 +192,22 @@ __global__ void conv2d_kernel(
     if (col < out_size && row < out_size && channel < out_channels && batch < batch_size)
     {
         float sum = bias[channel];
-        for (int k_row = 0; k_row < kernel_size; ++k_row)
+        for (int c = 0; c < in_channels; ++c)
         {
-            for (int k_col = 0; k_col < kernel_size; ++k_col)
+            for (int k_row = 0; k_row < kernel_size; ++k_row)
             {
-                int input_row = row + k_row;
-                int input_col = col + k_col;
-                float k_val = kernels[channel * kernel_size * kernel_size + k_row * kernel_size + k_col];
-                float in_val = input[batch * in_size * in_size + input_row * in_size + input_col];
-                sum += in_val * k_val;
+                for (int k_col = 0; k_col < kernel_size; ++k_col)
+                {
+                    int input_row = row + k_row;
+                    int input_col = col + k_col;
+                    float k_val = kernels[channel * in_channels * kernel_size * kernel_size +
+                        c * kernel_size * kernel_size +
+                        k_row * kernel_size + k_col];
+                    float in_val = input[batch * in_channels * in_size * in_size +
+                        c * in_size * in_size +
+                        input_row * in_size + input_col];
+                    sum += in_val * k_val;
+                }
             }
         }
         output[batch * out_channels * out_size * out_size +
@@ -515,6 +528,27 @@ __global__ void sgd_update_kernel(float* param, float* grad, int size, float lr)
     }
 }
 
+__global__ void fc_to_pool_grad_kernel(
+    float* d_fc_grad,    // [BATCH_SIZE, NUM_CLASSES]
+    float* d_fc_weights, // [FC_INPUT_SIZE, NUM_CLASSES]
+    float* d_pool_grad,  // [BATCH_SIZE, FC_INPUT_SIZE]
+    int batch_size,
+    int fc_input_size,
+    int num_classes)
+{
+    int b = blockIdx.y;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b < batch_size && i < fc_input_size)
+    {
+        float grad = 0.0f;
+        for (int c = 0; c < num_classes; ++c)
+        {
+            grad += d_fc_grad[b * num_classes + c] * d_fc_weights[i * num_classes + c];
+        }
+        d_pool_grad[b * fc_input_size + i] = grad;
+    }
+}
+
 // Function to train the model using CUDA
 void train_cuda(const std::vector<Image>& dataset)
 {
@@ -541,7 +575,7 @@ void train_cuda(const std::vector<Image>& dataset)
     cudaError_t error;
 
     // Allocate memory for batch inputs and labels
-    error = cudaMalloc(&d_images, BATCH_SIZE * IMAGE_PIXELS * sizeof(float));
+    error = cudaMalloc(&d_images, BATCH_SIZE * IN_CHANNELS * IMAGE_PIXELS * sizeof(float));
     check_cuda_error(error, "Batch images allocation failed");
 
     error = cudaMalloc(&d_labels, BATCH_SIZE * sizeof(int));
@@ -582,7 +616,7 @@ void train_cuda(const std::vector<Image>& dataset)
     error = cudaMalloc(&d_fc_bias_grad, NUM_CLASSES * sizeof(float));
     check_cuda_error(error, "FC bias gradient allocation failed");
 
-    cudaMalloc(&d_conv_kernels_grad, CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float));
+    cudaMalloc(&d_conv_kernels_grad, CONV_OUT_CHANNELS * IN_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float));
     cudaMalloc(&d_conv_bias_grad, CONV_OUT_CHANNELS * sizeof(float));
 
     float* d_pool_grad_output; // [BATCH_SIZE, CONV_OUT_CHANNELS, POOL_OUT_SIZE, POOL_OUT_SIZE]
@@ -616,20 +650,20 @@ void train_cuda(const std::vector<Image>& dataset)
         for (int batch = 0; batch < num_batches; ++batch)
         {
             // Prepare batch data
-            std::vector<float> batch_images(BATCH_SIZE * IMAGE_PIXELS);
+            std::vector<float> batch_images(BATCH_SIZE * IN_CHANNELS * IMAGE_PIXELS);
             std::vector<int> batch_labels(BATCH_SIZE);
 
             for (int i = 0; i < BATCH_SIZE; ++i)
             {
                 const auto& img = shuffled_data[batch * BATCH_SIZE + i];
                 std::copy(img.pixels.begin(), img.pixels.end(),
-                    batch_images.begin() + i * IMAGE_PIXELS);
+                    batch_images.begin() + i * IN_CHANNELS * IMAGE_PIXELS);
                 batch_labels[i] = img.label;
             }
 
             // Copy batch data to GPU
             error = cudaMemcpy(d_images, batch_images.data(),
-                BATCH_SIZE * IMAGE_PIXELS * sizeof(float),
+                BATCH_SIZE * IN_CHANNELS * IMAGE_PIXELS * sizeof(float),
                 cudaMemcpyHostToDevice);
             check_cuda_error(error, "Batch images transfer failed");
 
@@ -650,6 +684,7 @@ void train_cuda(const std::vector<Image>& dataset)
                 d_conv_output,
                 params.conv_kernels,
                 params.conv_bias,
+                IN_CHANNELS, // <--- Pass 3 here!
                 IMAGE_SIZE,
                 CONV_KERNEL_SIZE,
                 CONV_OUT_CHANNELS,
@@ -740,6 +775,18 @@ void train_cuda(const std::vector<Image>& dataset)
                 NUM_CLASSES,
                 LEARNING_RATE);
 
+            // Compute gradient w.r.t. pool output (from FC backward)
+            dim3 fc2pool_blocks((FC_INPUT_SIZE + 255) / 256, BATCH_SIZE);
+            fc_to_pool_grad_kernel << <fc2pool_blocks, 256 >> > (
+                d_softmax_grad,     // [BATCH_SIZE, NUM_CLASSES]
+                params.fc_weights,  // [FC_INPUT_SIZE, NUM_CLASSES]
+                d_pool_grad_output, // [BATCH_SIZE, FC_INPUT_SIZE]
+                BATCH_SIZE,
+                FC_INPUT_SIZE,
+                NUM_CLASSES);
+            check_cuda_error(cudaGetLastError(), "FC-to-pool grad kernel launch");
+            check_cuda_error(cudaDeviceSynchronize(), "FC-to-pool grad kernel execution");
+
             // 1. Compute gradient w.r.t. pool output (from FC backward)
             cudaMemset(d_pool_grad_output, 0, BATCH_SIZE * CONV_OUT_CHANNELS * POOL_OUT_SIZE * POOL_OUT_SIZE * sizeof(float));
 
@@ -747,13 +794,14 @@ void train_cuda(const std::vector<Image>& dataset)
             int pool_bwd_x = std::max(1, (POOL_OUT_SIZE + 7) / 8);
             int pool_bwd_y = std::max(1, (POOL_OUT_SIZE + 7) / 8);
             int pool_bwd_z = std::max(1, CONV_OUT_CHANNELS * BATCH_SIZE);
-            if (pool_bwd_z > 65535) {
+            if (pool_bwd_z > 65535)
+            {
                 std::cerr << "Error: pool_bwd_z (" << pool_bwd_z << ") exceeds CUDA grid limit (65535).\n";
                 exit(-1);
             }
             dim3 pool_bwd_blocks(pool_bwd_x, pool_bwd_y, pool_bwd_z);
             dim3 pool_bwd_threads(8, 8);
-            // std::cout << "Launching maxpool_backward_kernel with grid (" 
+            // std::cout << "Launching maxpool_backward_kernel with grid ("
             //           << pool_bwd_x << ", " << pool_bwd_y << ", " << pool_bwd_z << ")\n";
             maxpool_backward_kernel << <pool_bwd_blocks, pool_bwd_threads >> > (
                 d_relu_output,
@@ -762,8 +810,7 @@ void train_cuda(const std::vector<Image>& dataset)
                 CONV_OUT_CHANNELS,
                 CONV_OUT_SIZE,
                 2, // pool size
-                BATCH_SIZE
-                );
+                BATCH_SIZE);
             check_cuda_error(cudaGetLastError(), "MaxPool backward kernel launch");
             check_cuda_error(cudaDeviceSynchronize(), "MaxPool backward kernel execution");
 
@@ -793,11 +840,11 @@ void train_cuda(const std::vector<Image>& dataset)
             check_cuda_error(cudaGetLastError(), "Conv backward kernel launch");
             check_cuda_error(cudaDeviceSynchronize(), "Conv backward kernel execution");
 
-            int conv_weights_blocks = (CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE + 255) / 256;
+            int conv_weights_blocks = (CONV_OUT_CHANNELS * IN_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE + 255) / 256;
             sgd_update_kernel << <conv_weights_blocks, 256 >> > (
                 params.conv_kernels,
                 d_conv_kernels_grad,
-                CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE,
+                CONV_OUT_CHANNELS * IN_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE,
                 LEARNING_RATE);
 
             int conv_bias_blocks = (CONV_OUT_CHANNELS + 255) / 256;
@@ -859,16 +906,18 @@ void train_cuda(const std::vector<Image>& dataset)
         }
 
         // Epoch summary
-        float epoch_accuracy = static_cast<float>(correct_predictions) / (num_batches * BATCH_SIZE);
-        epoch_loss /= num_batches;
+        //     float epoch_accuracy = static_cast<float>(correct_predictions) / (num_batches * BATCH_SIZE);
+        // float milliseconds = 0;
+        // cudaEventElapsedTime(&milliseconds, start, stop);
+        // std::cout << "\nCUDA CNN training completed in "
+        //     << milliseconds / 1000.0f << " seconds\n";
 
-        std::cout << "\nEpoch " << epoch + 1 << " completed"
-            << " - Loss: " << std::fixed << std::setprecision(4) << epoch_loss
-            << " - Accuracy: " << std::fixed << std::setprecision(2)
-            << (epoch_accuracy * 100.0f) << "%" << std::endl;
-    }
+        // // Export model weights for evaluation
 
-    // Timing results
+        // Timing results
+    } // <-- This closes the epoch loop
+
+    // Now do timing, export, cleanup, and evaluation ONCE after all epochs
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     float milliseconds = 0;
@@ -877,23 +926,22 @@ void train_cuda(const std::vector<Image>& dataset)
         << milliseconds / 1000.0f << " seconds\n";
 
     // Export model weights for evaluation
-    std::vector<float> h_fc_weights(FC_INPUT_SIZE * NUM_CLASSES);
-    std::vector<float> h_fc_bias(NUM_CLASSES); // Changed to vector
-    std::vector<float> h_conv_kernels(CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE);
+    std::vector<float> h_conv_kernels(CONV_OUT_CHANNELS * IN_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE);
     std::vector<float> h_conv_bias(CONV_OUT_CHANNELS);
+    std::vector<float> h_fc_weights(FC_INPUT_SIZE * NUM_CLASSES);
+    std::vector<float> h_fc_bias(NUM_CLASSES);
 
-    // Copy parameters from device to host
+    cudaMemcpy(h_conv_kernels.data(), params.conv_kernels,
+        CONV_OUT_CHANNELS * IN_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float),
+        cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_conv_bias.data(), params.conv_bias,
+        CONV_OUT_CHANNELS * sizeof(float),
+        cudaMemcpyDeviceToHost);
     cudaMemcpy(h_fc_weights.data(), params.fc_weights,
         FC_INPUT_SIZE * NUM_CLASSES * sizeof(float),
         cudaMemcpyDeviceToHost);
     cudaMemcpy(h_fc_bias.data(), params.fc_bias,
         NUM_CLASSES * sizeof(float),
-        cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_conv_kernels.data(), params.conv_kernels,
-        CONV_OUT_CHANNELS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float),
-        cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_conv_bias.data(), params.conv_bias,
-        CONV_OUT_CHANNELS * sizeof(float),
         cudaMemcpyDeviceToHost);
 
     // Clean up

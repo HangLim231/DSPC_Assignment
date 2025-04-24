@@ -83,17 +83,17 @@ void displayPredictionResults(const Image& img, int prediction, int actual_label
 }
 
 // Run full evaluation on test dataset
-void evaluate_model(const string& test_path,
-    const vector<float>& conv_kernels,
-    const vector<float>& conv_bias,
-    const vector<float>& fc_weights,
-    const vector<float>& fc_bias)
+void evaluate_model(const std::string& test_file,
+    const std::vector<float>& conv_kernels,
+    const std::vector<float>& conv_bias,
+    const std::vector<float>& fc_weights,
+    const std::vector<float>& fc_bias)
 {
 
-    vector<Image> test_set = load_dataset({ test_path });
+    vector<Image> test_set = load_dataset({ test_file });
     if (test_set.empty())
     {
-        cerr << "Failed to load test data from: " << test_path << "\n";
+        cerr << "Failed to load test data from: " << test_file << "\n";
         return;
     }
 

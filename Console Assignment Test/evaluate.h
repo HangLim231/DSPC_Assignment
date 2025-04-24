@@ -12,7 +12,7 @@ int predict(const Image& img,
     const std::vector<float>& fc_bias);
 
 // Evaluate a trained CNN model on test dataset
-void evaluate_model(const std::string& test_path,
+void evaluate_model(const std::string& test_file,
     const std::vector<float>& conv_kernels,
     const std::vector<float>& conv_bias,
     const std::vector<float>& fc_weights,
